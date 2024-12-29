@@ -10,6 +10,7 @@ pub mod betting_service {
     pub fn initialize(ctx: Context<Initialize>, admin: Pubkey) -> Result<()> {
         let state = &mut ctx.accounts.state;
         state.admins.push(admin);
+        state.markets = vec![];
         Ok(())
     }
 
@@ -40,7 +41,7 @@ pub mod betting_service {
         max_bet: u64,
         max_cumulative_bet: u64,
     ) -> Result<()> {
-        let state = &ctx.accounts.state;
+        let state = &mut ctx.accounts.state;
 
         // Only admins can create markets
         require!(
@@ -66,7 +67,45 @@ pub mod betting_service {
         market.status = MarketStatus::Opened;
         market.outcomes = vec![];
 
+        // Add the market's public key to the state's markets list
+        state.markets.push(market.key());
+
         Ok(())
+    }
+
+    pub fn get_market_info(ctx: Context<GetMarketInfo>, market_pubkey: Pubkey) -> Result<Market> {
+        let state = &ctx.accounts.state;
+
+        // Check if the market exists in the state's markets list
+        require!(
+            state.markets.contains(&market_pubkey),
+            ErrorCode::MarketNotFound
+        );
+
+        let market = &ctx.accounts.market;
+
+        // Return the market's details
+        let market_info = Market {
+            admin: market.admin,
+            market_title: market.market_title.clone(),
+            market_description: market.market_description.clone(),
+            market_type: market.market_type.clone(),
+            tokens: market.tokens,
+            opening_date: market.opening_date,
+            closing_date: market.closing_date,
+            settlement_date: market.settlement_date,
+            commission_percentage: market.commission_percentage,
+            min_bet: market.min_bet,
+            max_bet: market.max_bet,
+            max_cumulative_bet: market.max_cumulative_bet,
+            total_bets: market.total_bets,
+            status: market.status.clone(),
+            outcomes: market.outcomes.clone(),
+            winning_outcome: market.winning_outcome.clone(),
+            user_bets: market.user_bets.clone()
+        };
+
+        Ok(market_info)
     }
 
     pub fn get_admin_info(ctx: Context<GetAdminInfo>, admin_pubkey: Pubkey) -> Result<AdminInfo> {
@@ -89,7 +128,7 @@ pub mod betting_service {
 
     pub fn place_bet(ctx: Context<PlaceBet>, outcome_index: u8, amount: u64) -> Result<()> {
         let market = &mut ctx.accounts.market;
-
+        let user = &mut ctx.accounts.user;
         // Validate market status and dates
         require!(
             market.status == MarketStatus::Opened,
@@ -106,7 +145,7 @@ pub mod betting_service {
         require!(amount <= market.max_bet, ErrorCode::BetTooLarge);
 
         // Update user bet totals and ensure max cumulative bet is not exceeded
-        let total_user_bet = market.user_bets.entry(*ctx.accounts.user.key).or_insert(0);
+        let total_user_bet = market.user_bets.entry(*ctx.accounts.signer.key).or_insert(0);
         *total_user_bet += amount;
         require!(
             *total_user_bet <= market.max_cumulative_bet,
@@ -120,10 +159,38 @@ pub mod betting_service {
         market.outcomes[outcome_index as usize].total_bets += amount;
 
         // Transfer SOL from user to market pool
-        **ctx.accounts.user.lamports.borrow_mut() -= amount;
+        **ctx.accounts.signer.lamports.borrow_mut() -= amount;
         **ctx.accounts.market_pool.lamports.borrow_mut() += amount;
 
+        user.total_bets += 1;
+        user.total_amount_bet += amount;
+        user.bets.push(UserBet {
+            market: market.key(),
+            outcome_index,
+            amount,
+        });
+
         Ok(())
+    }
+
+    pub fn get_user_info(ctx: Context<GetUserInfo>, user_address: Pubkey) -> Result<UserInfo> {
+        let user_account = &ctx.accounts.user;
+
+        // Ensure the user exists
+        require!(
+            user_account.address == user_address,
+            ErrorCode::UserNotFound
+        );
+
+        // Construct the UserInfo struct with the user's betting details
+        let user_info = UserInfo {
+            address: user_account.address,
+            total_bets: user_account.total_bets,
+            total_amount_bet: user_account.total_amount_bet,
+            bets: user_account.bets.clone(),
+        };
+
+        Ok(user_info)
     }
 
     pub fn settle_market(ctx: Context<SettleMarket>, winning_outcome: u8) -> Result<()> {
@@ -196,11 +263,13 @@ pub mod betting_service {
 
         Ok(())
     }
+
 }
 
 #[account]
 pub struct State {
     pub admins: Vec<Pubkey>,
+    pub markets: Vec<Pubkey>
 }
 
 #[derive(Accounts)]
@@ -246,9 +315,17 @@ pub struct PlaceBet<'info> {
     #[account(mut)]
     pub market: Account<'info, Market>,
     #[account(mut)]
-    pub user: Signer<'info>,
+    pub user: Account<'info, User>,
+    #[account(mut)]
+    pub signer: Signer<'info>,
     #[account(mut)]
     pub market_pool: SystemAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct GetUserInfo<'info> {
+    #[account(mut)]
+    pub user: Account<'info, User>,
 }
 
 #[derive(Accounts)]
@@ -282,6 +359,34 @@ pub struct AdminInfo {
     pub is_active: bool,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct UserMarketBetSummary {
+    pub market_pubkey: Pubkey, // The market's public key
+    pub total_bet: u64,        // Total bet amount by the user in this market
+}
+
+#[account]
+pub struct User {
+    pub address: Pubkey,
+    pub total_bets: u64,
+    pub total_amount_bet: u64,
+    pub bets: Vec<UserBet>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct UserBet {
+    pub market: Pubkey,
+    pub outcome_index: u8,
+    pub amount: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct UserInfo {
+    pub address: Pubkey,
+    pub total_bets: u64,
+    pub total_amount_bet: u64,
+    pub bets: Vec<UserBet>,
+}
 
 #[account]
 pub struct Market {
@@ -330,6 +435,24 @@ pub struct Outcome {
     pub index: u8,                       // 1 byte
     pub total_bets: u64,                 // 8 bytes
     pub user_bets: HashMap<Pubkey, u64>, // 4 + max_entries * entry_size
+}
+
+#[derive(Accounts)]
+pub struct GetMarketInfo<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub state: Account<'info, State>,
+    #[account(mut)]
+    pub market: Account<'info, Market>,
+}
+
+
+#[derive(Accounts)]
+pub struct GetUserBettingSummaryAcrossMarkets<'info> {
+    #[account()]
+    pub state: Account<'info, State>, // Global state containing admin and market info
+    #[account(signer)]
+    pub admin: Signer<'info>, // Admin to authorize fetching data
 }
 
 impl Outcome {
@@ -381,4 +504,8 @@ pub enum ErrorCode {
     NotEligibleForReward,
     #[msg("Admin not found.")]
     AdminNotFound,
+    #[msg("User has no betting history in this market.")]
+    UserNotFound,
+    #[msg("The specified market was not found.")]
+    MarketNotFound,
 }
