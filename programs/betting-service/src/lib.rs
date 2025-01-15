@@ -31,6 +31,7 @@ pub mod betting_service {
         ctx: Context<CreateMarket>,
         market_title: String,
         market_description: String,
+        market_logo: String,
         market_type: MarketType,
         tokens: Option<[Pubkey; 2]>,
         opening_date: i64,
@@ -54,6 +55,7 @@ pub mod betting_service {
         market.admin = *ctx.accounts.admin.key;
         market.market_title = market_title;
         market.market_description = market_description;
+        market.market_logo = market_logo;
         market.market_type = market_type;
         market.tokens = tokens;
         market.opening_date = opening_date;
@@ -95,6 +97,7 @@ pub mod betting_service {
             closing_date: market.closing_date,
             settlement_date: market.settlement_date,
             commission_percentage: market.commission_percentage,
+            market_logo: market.market_logo.clone(),
             min_bet: market.min_bet,
             max_bet: market.max_bet,
             max_cumulative_bet: market.max_cumulative_bet,
@@ -102,7 +105,7 @@ pub mod betting_service {
             status: market.status.clone(),
             outcomes: market.outcomes.clone(),
             winning_outcome: market.winning_outcome.clone(),
-            user_bets: market.user_bets.clone()
+            user_bets: market.user_bets.clone(),
         };
 
         Ok(market_info)
@@ -145,7 +148,10 @@ pub mod betting_service {
         require!(amount <= market.max_bet, ErrorCode::BetTooLarge);
 
         // Update user bet totals and ensure max cumulative bet is not exceeded
-        let total_user_bet = market.user_bets.entry(*ctx.accounts.signer.key).or_insert(0);
+        let total_user_bet = market
+            .user_bets
+            .entry(*ctx.accounts.signer.key)
+            .or_insert(0);
         *total_user_bet += amount;
         require!(
             *total_user_bet <= market.max_cumulative_bet,
@@ -269,7 +275,7 @@ pub mod betting_service {
 #[account]
 pub struct State {
     pub admins: Vec<Pubkey>,
-    pub markets: Vec<Pubkey>
+    pub markets: Vec<Pubkey>,
 }
 
 #[derive(Accounts)]
@@ -390,9 +396,10 @@ pub struct UserInfo {
 
 #[account]
 pub struct Market {
-    pub admin: Pubkey,                   // 32 bytes
-    pub market_title: String,            // 4 bytes (length) + max length
-    pub market_description: String,      // 4 bytes (length) + max length
+    pub admin: Pubkey,              // 32 bytes
+    pub market_title: String,       // 4 bytes (length) + max length
+    pub market_description: String, // 4 bytes (length) + max length
+    pub market_logo: String,
     pub market_type: MarketType,         // 1 byte
     pub tokens: Option<[Pubkey; 2]>,     // 1 byte (discriminator) + 64 bytes (2 Pubkeys)
     pub opening_date: i64,               // 8 bytes
@@ -412,12 +419,14 @@ pub struct Market {
 impl Market {
     pub const MAX_TITLE_LENGTH: usize = 64; // Example max title length
     pub const MAX_DESC_LENGTH: usize = 256; // Example max description length
+    pub const MAX_LOGO_LENGTH: usize = 256; // Example max description length
     pub const MAX_OUTCOMES: usize = 4; // Maximum number of outcomes
     pub const MAX_BETS: usize = 100; // Maximum number of user bets
 
     pub const MAX_SIZE: usize = 32    // admin
         + 4 + Self::MAX_TITLE_LENGTH  // market_title
         + 4 + Self::MAX_DESC_LENGTH   // market_description
+        + 4 + Self::MAX_LOGO_LENGTH
         + 1                           // market_type
         + 1 + 64                      // tokens (Option<[Pubkey; 2]>)
         + 8 + 8 + 8                   // opening_date, closing_date, settlement_date
@@ -445,7 +454,6 @@ pub struct GetMarketInfo<'info> {
     #[account(mut)]
     pub market: Account<'info, Market>,
 }
-
 
 #[derive(Accounts)]
 pub struct GetUserBettingSummaryAcrossMarkets<'info> {
